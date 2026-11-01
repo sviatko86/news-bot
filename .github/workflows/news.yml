@@ -2,11 +2,11 @@ name: News bot
 
 on:
   schedule:
-    - cron: "*/20 * * * *"   # кожні 20 хвилин
+    - cron: "*/20 * * * *"
   workflow_dispatch:
     inputs:
       dry_run:
-        description: "1 = пробний запуск без публікації, 0 = публікувати"
+        description: "1 = probnyi zapusk, 0 = publikuvaty"
         default: "1"
 
 permissions:
