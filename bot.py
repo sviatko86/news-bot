@@ -100,6 +100,21 @@ def rss_image(e):
     return m.group(1) if m else None
 
 
+def og_image(url):
+    """Бере головну картинку зі сторінки новини (og:image)."""
+    try:
+        r = requests.get(url, timeout=12, headers={"User-Agent": "Mozilla/5.0"})
+        soup = BeautifulSoup(r.text, "html.parser")
+        for prop in ("og:image", "twitter:image"):
+            tag = soup.find("meta", attrs={"property": prop}) or \
+                  soup.find("meta", attrs={"name": prop})
+            if tag and tag.get("content", "").startswith("http"):
+                return tag["content"]
+    except Exception as e:
+        print(f"[!] og:image {url}: {e}")
+    return None
+
+
 def collect_channels(cutoff):
     """Читає публічні канали через веб-версію t.me/s/<назва>."""
     items = []
@@ -188,8 +203,7 @@ def pick_stories(items):
 найважливішої. Перевага подіям, про які пишуть кілька різних джерел і про які
 є достатньо конкретики (хто, що, де, цифри).
 
-Дуже важливо: події, де є новини з позначкою 📷 (є фото), мають пріоритет;
-події без жодного 📷 обирай лише в крайньому разі.
+Події з позначкою 📷 (є фото) мають невеликий пріоритет, але головне важливість.
 
 ПРОПУСКАЙ: повітряні тривоги і «шахеди в напрямку», локальну погоду, рекламу,
 промокоди, вакансії, розіграші, плітки про знаменитостей, голі заголовки без
@@ -283,6 +297,12 @@ def main():
         if not group:
             continue
         image = next((it["image"] for it in group if it.get("image")), None)
+        if not image:
+            for it in group[:4]:
+                image = og_image(it["link"])
+                if image:
+                    break
+        print("Фото:", image)
         if REQUIRE_PHOTO and not image:
             print("Пропускаю подію: немає фото")
             continue
