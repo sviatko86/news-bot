@@ -153,7 +153,7 @@ def ask(prompt, max_tokens=1500):
         max_tokens=max_tokens,
         messages=[{"role": "user", "content": prompt}],
     )
-    return r.content[0].text.strip()
+    return "".join(b.text for b in r.content if b.type == "text").strip()
 
 
 def pick_stories(items):
