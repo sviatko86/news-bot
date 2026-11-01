@@ -83,6 +83,22 @@ def clean(text):
     return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", text or "")).strip()
 
 
+def rss_image(e):
+    """Шукає картинку в RSS-записі."""
+    for key in ("media_content", "media_thumbnail"):
+        for m in e.get(key, []) or []:
+            if m.get("url"):
+                return m["url"]
+    for l in e.get("links", []) or []:
+        if l.get("rel") == "enclosure" and str(l.get("type", "")).startswith("image"):
+            return l.get("href")
+    raw = e.get("summary", "") or ""
+    for c in e.get("content", []) or []:
+        raw += c.get("value", "")
+    m = re.search(r'<img[^>]+src=["\']([^"\']+)', raw)
+    return m.group(1) if m else None
+
+
 def collect_channels(cutoff):
     """Читає публічні канали через веб-версію t.me/s/<назва>."""
     items = []
@@ -107,6 +123,11 @@ def collect_channels(cutoff):
                 ts = datetime.fromisoformat(time_el["datetime"]).timestamp()
                 if ts < cutoff:
                     continue
+            image = None
+            photo = msg.select_one(".tgme_widget_message_photo_wrap")
+            if photo and photo.get("style"):
+                mm = re.search(r"url\('([^']+)'\)", photo["style"])
+                image = mm.group(1) if mm else None
             text = clean(text_el.get_text(" "))
             if len(text) < 40:
                 continue
@@ -115,6 +136,7 @@ def collect_channels(cutoff):
                 "title": text[:120],
                 "summary": text[:500],
                 "link": link,
+                "image": image,
             })
     return items
 
@@ -141,6 +163,7 @@ def collect():
                 "title": clean(e.get("title")),
                 "summary": clean(e.get("summary"))[:400],
                 "link": link,
+                "image": rss_image(e),
             })
     print(f"Зібрано {len(items)} нових новин")
     return items
@@ -158,17 +181,22 @@ def ask(prompt, max_tokens=1500):
 
 def pick_stories(items):
     lines = [f"{i}. [{it['source']}] {it['title']}" for i, it in enumerate(items)]
+    n = POSTS_PER_RUN * 4
     prompt = f"""Ось список свіжих новин з різних джерел (Україна і світ).
-Згрупуй їх за подіями. Обери {POSTS_PER_RUN} найважливіших подій: перевага тим,
-про які пишуть кілька різних джерел, та тим, що найбільше впливають на людей.
-Мікс: хоча б одна українська, якщо є гідна.
+Згрупуй їх за подіями. Обери до {n} найважливіших подій і відсортуй від
+найважливішої. Перевага подіям, про які пишуть кілька різних джерел і про які
+є достатньо конкретики (хто, що, де, цифри).
+
+ПРОПУСКАЙ: повітряні тривоги і «шахеди в напрямку», локальну погоду, рекламу,
+промокоди, вакансії, розіграші, плітки про знаменитостей, голі заголовки без
+подробиць, особисті думки блогерів.
 
 Поверни ТІЛЬКИ JSON без пояснень і без ```:
 {{"stories": [{{"ids": [номери новин про цю подію]}}]}}
 
 Новини:
 """ + "\n".join(lines)
-    raw = ask(prompt)
+    raw = ask(prompt, max_tokens=2000)
     raw = re.sub(r"^```(?:json)?|```$", "", raw.strip(), flags=re.M).strip()
     return json.loads(raw)["stories"]
 
@@ -179,38 +207,55 @@ def write_post(group):
         f"[{it['source']}] {it['title']}\n{it['summary']}" for it in group
     )
     prompt = f"""Ти редактор українського новинного Telegram-каналу.
-На основі матеріалів нижче напиши пост українською. Своїми словами, нічого
-не копіюй дослівно.
+На основі матеріалів нижче напиши пост українською. Пиши своїми словами,
+нічого не копіюй дослівно. Текст має бути зрозумілий людині, яка нічого не
+знає про контекст.
 
-Формат (без markdown і HTML, звичайний текст):
-Перший рядок: емодзі + короткий заголовок.
-Далі 2-3 речення: що сталося.
-Потім рядок "Чому це важливо:" і 1-2 речення аналізу.
-Якщо матеріали з кількох джерел, зведи їх в одну цілісну історію з власною
-структурою і формулюваннями, не наслідуй порядок і фрази жодного джерела.
-Не вигадуй фактів, яких немає в матеріалах. Якщо джерела розходяться, скажи про це.
-Разом не більше 700 символів.
+Формат (звичайний текст, без markdown і HTML), рівно такий:
+Рядок 1: емодзі + чіткий заголовок (що саме сталося, не загальні слова).
+Порожній рядок.
+Далі 2-4 речення: що сталося, де, коли, хто, цифри.
+Порожній рядок.
+"Чому це важливо:" і 1-2 речення аналізу.
+
+Правила:
+- Зведи джерела в одну цілісну історію з власною структурою.
+- Не вигадуй фактів, яких немає в матеріалах. Якщо джерела розходяться, скажи про це.
+- Довжина 400-800 символів.
+- Якщо матеріалів замало для зрозумілого посту (лише заголовок без подробиць),
+  відповідай одним словом: SKIP
 
 Матеріали:
 {material}"""
-    return ask(prompt, max_tokens=800)
+    return ask(prompt, max_tokens=900)
+
+
+def is_good(text):
+    return text.strip() != "SKIP" and len(text) >= 300 and "Чому це важливо" in text
 
 
 # ---------- 4. Публікація ----------
-def send(text):
+def send(text, image=None, plain_len=0):
     if DRY_RUN:
-        print("\n--- ПОСТ (DRY RUN) ---\n" + text + "\n")
+        print("\n--- ПОСТ (DRY RUN) ---\n" + text + "\nФОТО: " + str(image) + "\n")
         return
-    r = requests.post(
-        f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
-        json={
-            "chat_id": TG_CHANNEL,
-            "text": text,
-            "parse_mode": "HTML",
-            "disable_web_page_preview": True,
-        },
-        timeout=30,
-    )
+    api = f"https://api.telegram.org/bot{TG_TOKEN}/"
+    if image:
+        try:
+            if plain_len <= 1000:   # підпис до фото максимум 1024 символи
+                r = requests.post(api + "sendPhoto", json={
+                    "chat_id": TG_CHANNEL, "photo": image,
+                    "caption": text, "parse_mode": "HTML"}, timeout=30)
+                r.raise_for_status()
+                return
+            r = requests.post(api + "sendPhoto", json={
+                "chat_id": TG_CHANNEL, "photo": image}, timeout=30)
+            r.raise_for_status()
+        except Exception as e:
+            print(f"[!] фото не вдалось ({e}), постю без нього")
+    r = requests.post(api + "sendMessage", json={
+        "chat_id": TG_CHANNEL, "text": text, "parse_mode": "HTML",
+        "disable_web_page_preview": True}, timeout=30)
     r.raise_for_status()
 
 
@@ -220,19 +265,36 @@ def main():
         print("Замало нових новин, виходжу")
         return
     stories = pick_stories(items)
-    for s in stories[:POSTS_PER_RUN]:
+    posted = 0
+    for s in stories:
+        if posted >= POSTS_PER_RUN:
+            break
         group = [items[i] for i in s["ids"] if 0 <= i < len(items)]
         if not group:
             continue
-        body = html.escape(write_post(group))
+        text = write_post(group)
+        if not is_good(text):
+            print("Пропускаю подію: замало подробиць")
+            for it in group:
+                mark_seen(it["link"])
+            continue
+        # унікальні джерела, по одному посиланню на джерело
+        uniq = {}
+        for it in group:
+            uniq.setdefault(it["source"], it["link"])
         sources = "\n".join(
-            f'• <a href="{html.escape(it["link"])}">{html.escape(it["source"])}</a>'
-            for it in group[:4]
+            f'• <a href="{html.escape(link)}">{html.escape(name)}</a>'
+            for name, link in list(uniq.items())[:5]
         )
-        send(f"{body}\n\n<b>Джерела:</b>\n{sources}")
+        image = next((it["image"] for it in group if it.get("image")), None)
+        plain_len = len(text) + 12 + sum(len(n) + 3 for n in list(uniq)[:5])
+        send(f"{html.escape(text)}\n\n<b>Джерела:</b>\n{sources}", image, plain_len)
         for it in group:
             mark_seen(it["link"])
+        posted += 1
         time.sleep(3)
+    if posted == 0:
+        print("Нічого гідного для публікації")
 
 
 if __name__ == "__main__":
