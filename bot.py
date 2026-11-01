@@ -27,6 +27,7 @@ DRY_RUN = os.environ.get("DRY_RUN") == "1"
 
 HOURS_BACK = 3          # скільки годин назад дивимось новини
 MAX_PER_FEED = 15       # скільки новин брати з кожної стрічки
+REQUIRE_PHOTO = True   # True = постити лише новини з фото
 POSTS_PER_RUN = 1       # скільки постів за один запуск
 
 FEEDS = {
@@ -180,12 +181,15 @@ def ask(prompt, max_tokens=1500):
 
 
 def pick_stories(items):
-    lines = [f"{i}. [{it['source']}] {it['title']}" for i, it in enumerate(items)]
+    lines = [f"{i}. {'📷 ' if it.get('image') else ''}[{it['source']}] {it['title']}" for i, it in enumerate(items)]
     n = POSTS_PER_RUN * 4
     prompt = f"""Ось список свіжих новин з різних джерел (Україна і світ).
 Згрупуй їх за подіями. Обери до {n} найважливіших подій і відсортуй від
 найважливішої. Перевага подіям, про які пишуть кілька різних джерел і про які
 є достатньо конкретики (хто, що, де, цифри).
+
+Дуже важливо: події, де є новини з позначкою 📷 (є фото), мають пріоритет;
+події без жодного 📷 обирай лише в крайньому разі.
 
 ПРОПУСКАЙ: повітряні тривоги і «шахеди в напрямку», локальну погоду, рекламу,
 промокоди, вакансії, розіграші, плітки про знаменитостей, голі заголовки без
@@ -236,9 +240,10 @@ def is_good(text):
 
 # ---------- 4. Публікація ----------
 def send(text, image=None, plain_len=0):
+    """Повертає True, якщо пост опубліковано."""
     if DRY_RUN:
         print("\n--- ПОСТ (DRY RUN) ---\n" + text + "\nФОТО: " + str(image) + "\n")
-        return
+        return True
     api = f"https://api.telegram.org/bot{TG_TOKEN}/"
     if image:
         try:
@@ -247,16 +252,21 @@ def send(text, image=None, plain_len=0):
                     "chat_id": TG_CHANNEL, "photo": image,
                     "caption": text, "parse_mode": "HTML"}, timeout=30)
                 r.raise_for_status()
-                return
+                return True
             r = requests.post(api + "sendPhoto", json={
                 "chat_id": TG_CHANNEL, "photo": image}, timeout=30)
             r.raise_for_status()
         except Exception as e:
-            print(f"[!] фото не вдалось ({e}), постю без нього")
+            print(f"[!] фото не вдалось ({e})")
+            if REQUIRE_PHOTO:
+                return False
+    elif REQUIRE_PHOTO:
+        return False
     r = requests.post(api + "sendMessage", json={
         "chat_id": TG_CHANNEL, "text": text, "parse_mode": "HTML",
         "disable_web_page_preview": True}, timeout=30)
     r.raise_for_status()
+    return True
 
 
 def main():
@@ -272,6 +282,10 @@ def main():
         group = [items[i] for i in s["ids"] if 0 <= i < len(items)]
         if not group:
             continue
+        image = next((it["image"] for it in group if it.get("image")), None)
+        if REQUIRE_PHOTO and not image:
+            print("Пропускаю подію: немає фото")
+            continue
         text = write_post(group)
         if not is_good(text):
             print("Пропускаю подію: замало подробиць")
@@ -286,9 +300,11 @@ def main():
             f'• <a href="{html.escape(link)}">{html.escape(name)}</a>'
             for name, link in list(uniq.items())[:5]
         )
-        image = next((it["image"] for it in group if it.get("image")), None)
         plain_len = len(text) + 12 + sum(len(n) + 3 for n in list(uniq)[:5])
-        send(f"{html.escape(text)}\n\n<b>Джерела:</b>\n{sources}", image, plain_len)
+        ok = send(f"{html.escape(text)}\n\n<b>Джерела:</b>\n{sources}", image, plain_len)
+        if not ok:
+            print("Пропускаю подію: фото не прийнято Telegram")
+            continue
         for it in group:
             mark_seen(it["link"])
         posted += 1
